@@ -27,6 +27,7 @@ jpackage \
     --main-class "${MAIN_CLASS}" \
     --dest "${DIST_DIR}" \
     --mac-package-name "${APP_NAME}" \
+    --icon src/main/resources/AppIcon.icns \
     --java-options "-Dapple.awt.enableTemplateImages=true" \
     --java-options "-Dapple.awt.UIElement=true"
 
