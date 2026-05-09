@@ -5,6 +5,9 @@ import java.awt.event.ActionListener;
 import java.awt.image.BufferedImage;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -28,9 +31,15 @@ public class UptimeBar {
     // Menu items that get updated
     private MenuItem uptimeDetailItem;
     private MenuItem bootTimeItem;
+    private MenuItem recordItem;
     private MenuItem daysItem;
     private MenuItem hoursItem;
     private MenuItem minutesItem;
+
+    // Longest uptime record (in seconds)
+    private long recordSeconds = 0;
+    private static final Path RECORD_DIR = Paths.get(System.getProperty("user.home"), "Library", "uptime-bar");
+    private static final Path RECORD_FILE = RECORD_DIR.resolve("longest_uptime");
 
     // Cached boot epoch — read once at startup since it never changes until reboot
     private long bootEpochSeconds = -1;
@@ -83,6 +92,11 @@ public class UptimeBar {
         popup.add(minutesItem);
 
         popup.addSeparator();
+
+        // --- Longest uptime record ---
+        recordItem = new MenuItem("☆ Record: —");
+        recordItem.setEnabled(false);
+        popup.add(recordItem);
 
         // --- Boot time ---
         bootTimeItem = new MenuItem("Boot: calculating...");
@@ -171,6 +185,8 @@ public class UptimeBar {
             // Ensure boot time is cached (reads sysctl once, then never again)
             if (bootEpochSeconds < 0) {
                 bootEpochSeconds = readBootEpoch();
+                // Load record on first run
+                recordSeconds = loadRecord();
             }
 
             if (bootEpochSeconds < 0) {
@@ -200,6 +216,16 @@ public class UptimeBar {
             daysItem.setLabel("  Days: " + days);
             hoursItem.setLabel("  Hours: " + hours);
             minutesItem.setLabel("  Minutes: " + minutes);
+
+            // Check and update the longest uptime record
+            if (totalSeconds > recordSeconds) {
+                recordSeconds = totalSeconds;
+                saveRecord(recordSeconds);
+            }
+            long recDays = recordSeconds / 86400;
+            long recHours = (recordSeconds % 86400) / 3600;
+            long recMinutes = (recordSeconds % 3600) / 60;
+            recordItem.setLabel("☆ Record: " + formatUptime(recDays, recHours, recMinutes));
 
             // Display boot time from the cached epoch
             Instant bootInstant = Instant.ofEpochSecond(bootEpochSeconds);
@@ -293,5 +319,34 @@ public class UptimeBar {
         sb.append(minutes).append("m");
 
         return sb.toString().trim();
+    }
+
+    /**
+     * Loads the longest recorded uptime (in seconds) from ~/Library/uptime-bar/longest_uptime.
+     * Returns 0 if the file does not exist or cannot be read.
+     */
+    private long loadRecord() {
+        try {
+            if (Files.exists(RECORD_FILE)) {
+                String content = Files.readString(RECORD_FILE).trim();
+                return Long.parseLong(content);
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to load uptime record: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    /**
+     * Persists the longest recorded uptime (in seconds) to ~/Library/uptime-bar/longest_uptime.
+     * Creates the directory if it does not exist.
+     */
+    private void saveRecord(long seconds) {
+        try {
+            Files.createDirectories(RECORD_DIR);
+            Files.writeString(RECORD_FILE, Long.toString(seconds));
+        } catch (Exception e) {
+            System.err.println("Failed to save uptime record: " + e.getMessage());
+        }
     }
 }
