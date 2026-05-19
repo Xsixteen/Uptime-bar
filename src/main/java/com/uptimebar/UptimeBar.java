@@ -150,7 +150,7 @@ public class UptimeBar {
      * @param category the single-character category label
      */
     private Image createTrayIcon(String category) {
-        int width = 30;  // Tight fit for arrow + letter
+        int width = 32;  // Extra room for wide letters like W
         int height = 22; // Standard macOS menu bar icon height
         BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g2d = image.createGraphics();
