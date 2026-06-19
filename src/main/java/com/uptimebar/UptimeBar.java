@@ -36,10 +36,22 @@ public class UptimeBar {
     private MenuItem hoursItem;
     private MenuItem minutesItem;
 
+    // Active time tracking
+    private MenuItem activeTimeItem;
+    private MenuItem activeRecordItem;
+    private MenuItem activeOdometerItem;
+    private long activeSeconds = 0;
+    private long activeRecordSeconds = 0;
+    private long activeOdometerSeconds = 0;
+    private long lastActiveCheckTimeMs = 0;
+
     // Longest uptime record (in seconds)
     private long recordSeconds = 0;
     private static final Path RECORD_DIR = Paths.get(System.getProperty("user.home"), "Library", "uptime-bar");
     private static final Path RECORD_FILE = RECORD_DIR.resolve("longest_uptime");
+    private static final Path ACTIVE_SESSION_FILE = RECORD_DIR.resolve("current_active_session");
+    private static final Path ACTIVE_RECORD_FILE = RECORD_DIR.resolve("longest_active_time");
+    private static final Path ACTIVE_ODOMETER_FILE = RECORD_DIR.resolve("active_odometer");
 
     // Cached boot epoch — read once at startup since it never changes until reboot
     private long bootEpochSeconds = -1;
@@ -105,6 +117,21 @@ public class UptimeBar {
 
         popup.addSeparator();
 
+        // --- Active Time ---
+        activeTimeItem = new MenuItem("Active: calculating...");
+        activeTimeItem.setEnabled(false);
+        popup.add(activeTimeItem);
+
+        activeRecordItem = new MenuItem("☆ Active Record: —");
+        activeRecordItem.setEnabled(false);
+        popup.add(activeRecordItem);
+
+        activeOdometerItem = new MenuItem("∑ Active Odometer: —");
+        activeOdometerItem.setEnabled(false);
+        popup.add(activeOdometerItem);
+
+        popup.addSeparator();
+
         // --- Refresh ---
         MenuItem refreshItem = new MenuItem("↻ Refresh Now");
         refreshItem.addActionListener(e -> updateUptime());
@@ -145,12 +172,12 @@ public class UptimeBar {
     /**
      * Creates a tray icon with an upward arrow and a category letter.
      * The letter indicates the largest uptime unit:
-     *   M = month, W = week, D = day, H = hour, m = minute, S = seconds
+     * M = month, W = week, D = day, H = hour, m = minute, S = seconds
      *
      * @param category the single-character category label
      */
     private Image createTrayIcon(String category) {
-        int width = 32;  // Extra room for wide letters like W
+        int width = 32; // Extra room for wide letters like W
         int height = 22; // Standard macOS menu bar icon height
         BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g2d = image.createGraphics();
@@ -164,9 +191,9 @@ public class UptimeBar {
         g2d.setStroke(new BasicStroke(2.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
 
         int arrowX = 6;
-        g2d.drawLine(arrowX, 4, arrowX, 18);       // shaft
-        g2d.drawLine(arrowX, 4, arrowX - 5, 10);   // left head
-        g2d.drawLine(arrowX, 4, arrowX + 5, 10);   // right head
+        g2d.drawLine(arrowX, 4, arrowX, 18); // shaft
+        g2d.drawLine(arrowX, 4, arrowX - 5, 10); // left head
+        g2d.drawLine(arrowX, 4, arrowX + 5, 10); // right head
 
         // Draw the category letter to the right of the arrow
         g2d.setFont(new Font("Futura", Font.BOLD, 14));
@@ -185,13 +212,17 @@ public class UptimeBar {
             // Ensure boot time is cached (reads sysctl once, then never again)
             if (bootEpochSeconds < 0) {
                 bootEpochSeconds = readBootEpoch();
-                // Load record on first run
-                recordSeconds = loadRecord();
+                // Load records on first run
+                recordSeconds = loadRecord(RECORD_FILE);
+                activeRecordSeconds = loadRecord(ACTIVE_RECORD_FILE);
+                activeOdometerSeconds = loadRecord(ACTIVE_ODOMETER_FILE);
+                activeSeconds = loadActiveSession(bootEpochSeconds);
             }
 
             if (bootEpochSeconds < 0) {
                 trayIcon.setToolTip("Uptime: unavailable");
                 uptimeDetailItem.setLabel("Uptime: unavailable");
+                activeTimeItem.setLabel("Active: unavailable");
                 return;
             }
 
@@ -220,7 +251,7 @@ public class UptimeBar {
             // Check and update the longest uptime record
             if (totalSeconds > recordSeconds) {
                 recordSeconds = totalSeconds;
-                saveRecord(recordSeconds);
+                saveRecord(RECORD_FILE, recordSeconds);
             }
             long recDays = recordSeconds / 86400;
             long recHours = (recordSeconds % 86400) / 3600;
@@ -232,6 +263,48 @@ public class UptimeBar {
             LocalDateTime bootTime = LocalDateTime.ofInstant(bootInstant, ZoneId.systemDefault());
             DateTimeFormatter formatter = DateTimeFormatter.ofPattern("EEE, MMM d 'at' h:mm a");
             bootTimeItem.setLabel("Boot: " + bootTime.format(formatter));
+
+            // --- Active Time Calculation ---
+            long nowMs = System.currentTimeMillis();
+            if (lastActiveCheckTimeMs > 0) {
+                long elapsedMs = nowMs - lastActiveCheckTimeMs;
+                long idleNs = readIdleTimeNs();
+
+                long addedSeconds = elapsedMs / 1000;
+                if (addedSeconds > 120) {
+                    addedSeconds = 60; // Cap to 1 minute if there was a large gap (e.g. sleep)
+                }
+
+                long activeThresholdNs = (addedSeconds * 1_000_000_000L) + 10_000_000_000L; // 10s buffer
+                if (idleNs >= 0 && idleNs < activeThresholdNs) {
+                    activeSeconds += addedSeconds;
+                    activeOdometerSeconds += addedSeconds;
+                    saveActiveSession(bootEpochSeconds, activeSeconds);
+                    saveRecord(ACTIVE_ODOMETER_FILE, activeOdometerSeconds);
+                }
+            }
+            lastActiveCheckTimeMs = nowMs;
+
+            // Check and update the longest active time record
+            if (activeSeconds > activeRecordSeconds) {
+                activeRecordSeconds = activeSeconds;
+                saveRecord(ACTIVE_RECORD_FILE, activeRecordSeconds);
+            }
+
+            long actDays = activeSeconds / 86400;
+            long actHours = (activeSeconds % 86400) / 3600;
+            long actMinutes = (activeSeconds % 3600) / 60;
+            activeTimeItem.setLabel("Active: " + formatUptime(actDays, actHours, actMinutes));
+
+            long actRecDays = activeRecordSeconds / 86400;
+            long actRecHours = (activeRecordSeconds % 86400) / 3600;
+            long actRecMinutes = (activeRecordSeconds % 3600) / 60;
+            activeRecordItem.setLabel("☆ Record: " + formatUptime(actRecDays, actRecHours, actRecMinutes));
+
+            long odoDays = activeOdometerSeconds / 86400;
+            long odoHours = (activeOdometerSeconds % 86400) / 3600;
+            long odoMinutes = (activeOdometerSeconds % 3600) / 60;
+            activeOdometerItem.setLabel("∑ Odometer: " + formatUptime(odoDays, odoHours, odoMinutes));
 
         } catch (Exception e) {
             System.err.println("Error updating uptime: " + e.getMessage());
@@ -268,13 +341,15 @@ public class UptimeBar {
                 return -1;
             }
 
-            // Output format: { sec = 1715100000, usec = 0 } Thu May  7 12:00:00 2026
+            // Output format: { sec = 1715100000, usec = 0 } Thu May 7 12:00:00 2026
             int secStart = output.indexOf("sec = ");
-            if (secStart == -1) return -1;
+            if (secStart == -1)
+                return -1;
 
             secStart += 6; // Skip "sec = "
             int secEnd = output.indexOf(",", secStart);
-            if (secEnd == -1) return -1;
+            if (secEnd == -1)
+                return -1;
 
             return Long.parseLong(output.substring(secStart, secEnd).trim());
 
@@ -291,16 +366,21 @@ public class UptimeBar {
 
     /**
      * Returns the max uptime category letter based on total elapsed seconds.
-     *   M = month (30+ days), W = week (7+ days), D = day (1+ day),
-     *   H = hour (1+ hour), m = minute (1+ minute), S = seconds
+     * M = month (30+ days), W = week (7+ days), D = day (1+ day),
+     * H = hour (1+ hour), m = minute (1+ minute), S = seconds
      */
     private String getUptimeCategory(long totalSeconds) {
         long days = totalSeconds / 86400;
-        if (days >= 30) return "M";
-        if (days >= 7)  return "W";
-        if (days >= 1)  return "D";
-        if (totalSeconds >= 3600) return "H";
-        if (totalSeconds >= 60)   return "m";
+        if (days >= 30)
+            return "M";
+        if (days >= 7)
+            return "W";
+        if (days >= 1)
+            return "D";
+        if (totalSeconds >= 3600)
+            return "H";
+        if (totalSeconds >= 60)
+            return "m";
         return "S";
     }
 
@@ -322,31 +402,99 @@ public class UptimeBar {
     }
 
     /**
-     * Loads the longest recorded uptime (in seconds) from ~/Library/uptime-bar/longest_uptime.
+     * Loads a recorded value (in seconds) from the specified path.
      * Returns 0 if the file does not exist or cannot be read.
      */
-    private long loadRecord() {
+    private long loadRecord(Path path) {
         try {
-            if (Files.exists(RECORD_FILE)) {
-                String content = Files.readString(RECORD_FILE).trim();
+            if (Files.exists(path)) {
+                String content = Files.readString(path).trim();
                 return Long.parseLong(content);
             }
         } catch (Exception e) {
-            System.err.println("Failed to load uptime record: " + e.getMessage());
+            System.err.println("Failed to load record: " + e.getMessage());
         }
         return 0;
     }
 
     /**
-     * Persists the longest recorded uptime (in seconds) to ~/Library/uptime-bar/longest_uptime.
+     * Persists a recorded value (in seconds) to the specified path.
      * Creates the directory if it does not exist.
      */
-    private void saveRecord(long seconds) {
+    private void saveRecord(Path path, long seconds) {
         try {
             Files.createDirectories(RECORD_DIR);
-            Files.writeString(RECORD_FILE, Long.toString(seconds));
+            Files.writeString(path, Long.toString(seconds));
         } catch (Exception e) {
-            System.err.println("Failed to save uptime record: " + e.getMessage());
+            System.err.println("Failed to save record: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Loads the current active session time if the boot epoch matches.
+     */
+    private long loadActiveSession(long currentBootEpoch) {
+        try {
+            if (Files.exists(ACTIVE_SESSION_FILE)) {
+                String[] parts = Files.readString(ACTIVE_SESSION_FILE).trim().split(":");
+                if (parts.length == 2) {
+                    long savedBootEpoch = Long.parseLong(parts[0]);
+                    if (savedBootEpoch == currentBootEpoch) {
+                        return Long.parseLong(parts[1]);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to load active session: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    /**
+     * Persists the current active session time, tagged with the boot epoch.
+     */
+    private void saveActiveSession(long currentBootEpoch, long currentActiveSeconds) {
+        try {
+            Files.createDirectories(RECORD_DIR);
+            Files.writeString(ACTIVE_SESSION_FILE, currentBootEpoch + ":" + currentActiveSeconds);
+        } catch (Exception e) {
+            System.err.println("Failed to save active session: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Reads the current idle time in nanoseconds via ioreg.
+     */
+    private long readIdleTimeNs() {
+        Process process = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder("ioreg", "-c", "IOHIDSystem");
+            pb.redirectErrorStream(true);
+            process = pb.start();
+
+            long idleTime = -1;
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.contains("\"HIDIdleTime\"")) {
+                        String[] parts = line.split("=");
+                        if (parts.length == 2) {
+                            idleTime = Long.parseLong(parts[1].trim());
+                        }
+                        break;
+                    }
+                }
+            }
+
+            process.waitFor(2, TimeUnit.SECONDS);
+            return idleTime;
+        } catch (Exception e) {
+            System.err.println("Failed to read idle time: " + e.getMessage());
+            return -1;
+        } finally {
+            if (process != null) {
+                process.destroyForcibly();
+            }
         }
     }
 }
